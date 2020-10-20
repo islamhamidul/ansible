@@ -1,0 +1,433 @@
+#!/bin/bash
+set -u
+set -e
+
+cleanup() {
+  echo "Cleaning up few files......."
+  sudo  rm  -rf /tmp/connector-*
+  sudo rm -rf /tmp/.git
+  sudo sed -i '/#nvm Environmental Variables/d' /etc/profile
+  sudo sed -i '/#nvm env variables/d' /etc/profile
+  sudo sed -i '/NVM_DIR/d' /etc/profile
+  sudo rm -rf /tmp/npm-*
+  echo "Cleanup completed"
+}
+trap cleanup EXIT
+echo
+echo
+echo "***************Checking System Status for Connector Client Installer*************************"
+echo
+echo "1. Checking root user..."
+if [[ $(/usr/bin/id -u) -ne 0 ]]; 
+then
+    echo "Not running as root.Please run the Connector Client installer as root. Aborting Connector Client Installer."
+	echo
+    exit
+fi
+echo -e '\t Checking root user passed.'
+echo 
+echo "2. Checking OS Version..."
+if [ $(cat /etc/*-release | grep DISTRIB_ID) == "DISTRIB_ID=Ubuntu" ] && [ $(cat /etc/*-release | grep DISTRIB_RELEASE) == "DISTRIB_RELEASE=16.04"  -o  $(cat /etc/*-release | grep DISTRIB_RELEASE) == "DISTRIB_RELEASE=18.04" ];
+then
+       echo -e "\t Compatible OS version $(cat /etc/*-release | grep DISTRIB_ID) and $(cat /etc/*-release | grep DISTRIB_RELEASE) for the Connector Client installer"
+	   echo -e '\t Checking OS Version passed.'
+       #Copy your files here
+else
+       echo -e '\t Not Compatible OS version for the installer. OS version must be Ubuntu 16.04 or 18.04. Aborting Connector Client Installer.'
+       exit
+fi
+echo 
+#Checking presence of sudo group
+echo "3. Checking presence of sudo user group..."
+if grep -q sudo /etc/group
+then
+       echo -e '\t sudo group exists.'
+	   echo -e '\t Checking presence of sudo group passed.'
+else
+       echo -e '\t sudo group does not exist. Please create group sudo. Aborting Connector Client Installer.'
+	   exit 
+fi
+echo
+#Checking presence of user 
+echo "4. Checking presence of new User..."
+read -p 'NewUserName: ' clientname
+if [ "$clientname" != "connector" ]
+then
+        if id connector >/dev/null 2>&1; 
+        then
+                echo -e "\t Checking connector user existance passed."
+        else
+                echo -e "\t connector user does not exists. Please create connector user. Aborting Connector Client Installer."
+                exit
+        fi
+fi
+if id "$clientname" >/dev/null 2>&1; then
+        echo -e "\t $clientname user exists.Please select other user. Aborting Connector Client Installer."
+        exit
+else 
+		echo -e "\t Check user $clientname passed as user $clientname does not exist."
+fi
+echo
+echo "5. Checking Firewall status..."
+checkufw=$(ufw status | grep Status | awk '{print $2}')
+if [ $checkufw == "inactive" ]
+then
+    echo -e '\t Firewall is inactive.'
+	echo -e '\t Checking if ssh rule is added to the firewall rule.'
+	checkssh=$(ufw show added | grep 22 | awk '{print $2}')
+	if [ -z $checkssh ]
+	then
+		echo -e '\t Firewall rule for ssh is not added and allowing ssh rule'
+		sudo ufw allow 22 > /dev/null 2>&1
+		echo -e '\t Added firewall rule for ssh'
+	else
+		echo -e '\t ssh rule is present to the firewall rule.'
+	fi
+echo -e '\t Enabling Firewall Rule.'
+sudo ufw enable
+else
+echo -e '\t Firewall is active.'
+fi
+echo
+echo "6. Checking Available port..."
+port=$(ufw status | grep 300* | awk '{print $1}' | sort | uniq | tail -1)
+if [ -z $port ]
+then
+        newport=3000
+        echo -e '\t Port number that will be used is:' $newport
+elif [[ $port == 3000 ]]
+then
+        port=$(ufw status | grep 30 | awk '{print $1}' | sort | uniq | tail -1)
+        echo -e '\t Last used port number is:' $port
+        newport="$(($port+1))"
+        echo -e '\t Port number that will be used is:' $newport
+elif [[ $port != 3000 ]]
+then
+        port=$(ufw status | grep 30 | awk '{print $1}' | sort | uniq | tail -1)
+        echo -e '\t Last used port number is:' $port
+        newport="$(($port+1))"
+        echo -e '\t Port number that will be used is:' $newport
+fi
+echo -e "\t Checking if $newport is used..."
+portcheck=$(netstat -taupn | grep $newport | awk '{print $4}' | cut -d ":" -f 4-7)
+if [[ $portcheck -eq $newport ]]
+then
+        echo -e "\t Port already in use: $portcheck. Aborting Connector Client Installer."
+        exit
+else
+        echo -e "\t Port $newport is not used."
+fi
+echo
+# Update OS package
+echo "7. Update OS packages..."
+if [ $clientname == "connector" ]
+then
+	sudo apt-get -y update > /dev/null 2>&1
+	sudo apt-get -y upgrade > /dev/null 2>&1
+	echo -e '\t OS update completed successfully.'
+else
+	echo -e '\t OS update not needed as it is not a new setup'
+fi
+echo
+# Install base packages (libaio1, ibaio-dev, unzip, g++, gcc, make and git)
+echo "8. Installing required packages for Connector Client: libaio1,ibaio-dev, g++, gcc, make and git..."
+if [ $clientname == "connector" ]
+then
+	sudo apt-get -y install libaio1 libaio-dev unzip > /dev/null 2>&1
+	sudo apt-get -y install g++ gcc make git python unixodbc-dev > /dev/null 2>&1
+	echo -e '\t Additional required packages installation completed successfully.'
+else
+	echo -e '\t Additional packages not needed as it is not a new setup'
+fi
+echo  
+echo "9. Installing MongoDB 4.2.0..."
+if [ $clientname == "connector" ]
+then
+        if [ $(cat /etc/*-release | grep DISTRIB_ID) == "DISTRIB_ID=Ubuntu" ] && [ $(cat /etc/*-release | grep DISTRIB_RELEASE) == "DISTRIB_RELEASE=16.04" ]
+        then 
+                if [ -f /etc/mongod.conf ]
+                then
+                        echo -e "\t MongoDB is already present."
+                else
+                        # MongoDB Setup for Ubuntu 16.04
+                        echo -e '\t MongoDB Setup for Ubuntu 16.04'
+                        sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv 4B7C549A058F8B6B > /dev/null 2>&1
+                        echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu xenial/mongodb-org/4.2 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-4.2.list > /dev/null 2>&1
+                        sudo apt -y update > /dev/null 2>&1
+                        sudo apt install -y mongodb-org=4.2.0 mongodb-org-server=4.2.0 mongodb-org-shell=4.2.0 mongodb-org-mongos=4.2.0 mongodb-org-tools=4.2.0 > /dev/null 2>&1
+                        sudo systemctl enable mongod > /dev/null 2>&1
+                        sudo systemctl start mongod > /dev/null 2>&1
+                        echo -e '\t MongoDB 4.2.0 successfully installed.'
+                fi 
+        elif [ $(cat /etc/*-release | grep DISTRIB_ID) == "DISTRIB_ID=Ubuntu" ] && [ $(cat /etc/*-release | grep DISTRIB_RELEASE) == "DISTRIB_RELEASE=18.04" ]
+        then
+                if [ -f /etc/mongod.conf ]
+                then
+                        echo -e "\t MongoDB is already present."
+                else
+                        # MongoDB Setup for Ubuntu 18.04
+                        echo -e '\t MongoDB Setup for Ubuntu 18.04'
+                        sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv 4B7C549A058F8B6B > /dev/null 2>&1
+                        echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu bionic/mongodb-org/4.2 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-4.2.list > /dev/null 2>&1
+                        sudo apt -y update > /dev/null 2>&1
+                        sudo apt install -y mongodb-org=4.2.0 mongodb-org-server=4.2.0 mongodb-org-shell=4.2.0 mongodb-org-mongos=4.2.0 mongodb-org-tools=4.2.0 > /dev/null 2>&1
+                        sudo systemctl enable mongod > /dev/null 2>&1
+                        sudo systemctl start mongod > /dev/null 2>&1
+                                echo -e '\t MongoDB 4.2.0 successfully installed.'
+                fi 
+        else
+                echo "Can't install MongoDB as the Ubuntu Image is neither 16.04 or 18.04"
+                exit
+        fi
+else
+        echo -e '\t MongoDB Install not required.'
+fi
+echo
+echo "10. Checking MongoDB process..."
+mongostatus=$(systemctl status mongod | grep Active | awk '{print $2}')
+if [[ $mongostatus == "active" ]]
+then
+		echo -e '\t MongoDB process is running.'
+		mongodversion=$(mongod --version | head -1 | awk '{print $1,$2,$3}')
+		echo -e '\t Mongod Version is:' $mongodversion
+		
+else
+        echo -e '\t MongoDB process is not running. Aborting Connector Client Installer.'
+        exit
+fi
+echo
+echo "11. Checking Oracle Client..."
+#Oracle Client 19.5.0 install
+if [[ -d "/opt/oracle/" ]]
+then
+    echo -e '\t Oracle directory present. Aborting Oracle Client Install.'
+else
+	echo -e '\t Oracle Client is not installed'
+	echo -e '\t Installing Oracle Client 19.5.0...'
+	cd /tmp/ && wget https://download.oracle.com/otn_software/linux/instantclient/195000/instantclient-basic-linux.x64-19.5.0.0.0dbru.zip > /dev/null 2>&1
+	cd /tmp &&  wget https://download.oracle.com/otn_software/linux/instantclient/195000/instantclient-sdk-linux.x64-19.5.0.0.0dbru.zip > /dev/null 2>&1
+	cd /tmp && unzip instantclient-sdk-linux.x64-19.5.0.0.0dbru.zip > /dev/null 2>&1
+	cd /tmp && unzip instantclient-basic-linux.x64-19.5.0.0.0dbru.zip > /dev/null 2>&1
+	sudo rm -rf instantclient-basic-linux.x64-19.5.0.0.0dbru.zip instantclient-sdk-linux.x64-19.5.0.0.0dbru.zip > /dev/null 2>&1
+	sudo mkdir -p /opt/oracle/ > /dev/null 2>&1
+	sudo mv /tmp/instantclient_19_5 /opt/oracle/instantclient > /dev/null 2>&1
+	sudo echo -e "\n" >> /etc/profile
+	sudo echo -e "#Oracle Environmental Variables" >> /etc/profile
+	sudo echo -e 'export LD_LIBRARY_PATH=/opt/oracle/instantclient:$LD_LIBRARY_PATH' >> /etc/profile
+	sudo echo -e "export TNS_ADMIN=/opt/oracle/instantclient" >> /etc/profile
+	sudo echo -e "export OCI_INC_DIR=/opt/oracle/instantclient/sdk/include" >> /etc/profile
+	sudo echo -e "export OCI_LIB_DIR=/opt/oracle/instantclient" >> /etc/profile
+	echo -e '\t Successfully installed Oracle Client 19.5.0'
+fi
+oraclestatus=$(cat /opt/oracle/instantclient/BASIC_README | grep "Client Shared Library 64-bit" | awk '{print $6}')
+if [ -z $oraclestatus ]
+then
+        echo -e '\t Oracle Client application could not be found. Aborting Connector Client Installer.'
+		exit 
+else
+        echo -e '\t Oracle Version is:' $oraclestatus
+fi
+echo
+echo
+echo "12. Downloading BitBucket Repo files..."
+read -p 'BitBucketUserName: ' BitBucketUserName
+#Checking Bitbucket repo 
+cd /tmp && sudo git init > /dev/null 2>&1
+echo
+echo "Download Connector Admin Repo..."
+cd /tmp && sudo git clone https://$BitBucketUserName@bitbucket.org/rebuslongbow/connector-admin.git > /dev/null 2>&1 || { echo "Username or Password Incorrect. Aborting Connector Client Installer."; exit 1; }
+echo -e '\t Downloaded Connector Admin Repo Successfully.'
+echo
+echo "Download Connector Client Repo..."
+cd /tmp && sudo git clone https://$BitBucketUserName@bitbucket.org/rebuslongbow/connector-client.git > /dev/null 2>&1 || { echo "Username or Password Incorrect"; sudo rm -rf /tmp/connector-* ; exit 1; }
+echo -e '\t Downloaded Connector Client Repo successfully.'
+echo
+echo "******************System Status Checking Is Completed Successfully**************************************"
+echo
+echo "******************Setting up Connector Client Components************************************************"
+echo
+#Create connector user
+echo "Create $clientname client User..."
+read -s -p 'NewUserPassword: ' NewUserPassword
+sudo useradd -m -s /bin/bash -p $(openssl passwd -1 $NewUserPassword) $clientname -G sudo
+checkconnectorid=$(id $clientname)
+echo
+echo -e "\t User $clientname created successfully."
+echo -e "\t $clientname ID check:" $checkconnectorid
+
+# Setting oracle directory owner 
+if [ $clientname == "connector" ]
+then 
+sudo chmod -R 775 /opt/oracle
+sudo chown -R $clientname:$clientname /opt/oracle/
+fi
+
+#nvm/node/npm install
+echo
+echo "Installing nvm v0.35...."
+sudo su $clientname -c "cd /home/$clientname/ && curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.35.3/install.sh | bash && /home/$clientname/.nvm/install.sh" > /dev/null 2>&1 || { sudo su $clientname -c "cd /home/$clientname/ && wget https://storage.googleapis.com/nvm-install-files/nvm-master.zip" > /dev/null 2>&1 || { echo "Node Install Failed. Aborting Installer"; exit 1; } ; sudo su $clientname -c "cd /home/$clientname/ && unzip nvm-master.zip && mv nvm-master .nvm" > /dev/null 2>&1 ; sudo su $clientname -c "rm -rf /home/$clientname/nvm-master.zip" > /dev/null 2>&1; sudo echo -e "\n" >> /home/$clientname/.bashrc; sudo echo -e "#nvm Environmental Variables" >> /home/$clientname/.bashrc; sudo echo -e 'export NVM_DIR="/home/clientname/.nvm"' >> /home/$clientname/.bashrc; sudo sed -i "s/clientname/$clientname/g" /home/$clientname/.bashrc;sudo echo -e '[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm' >> /home/$clientname/.bashrc;sudo echo -e '[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion' >> /home/$clientname/.bashrc; }
+#sudo su $clientname -c "cd /home/$clientname/.nvm && ./install.sh" > /dev/null 2>&1
+sudo echo -e "\n" >> /etc/profile
+sudo echo -e "#nvm Environmental Variables" >> /etc/profile
+sudo echo -e 'export NVM_DIR="/home/clientname/.nvm"' >> /etc/profile
+sudo sed -i "s/clientname/$clientname/g" /etc/profile
+sudo echo -e '[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm' >> /etc/profile
+sudo echo -e '[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion' >> /etc/profile
+nvmversion=$(sudo su - $clientname -c "nvm --version")
+echo -e "\t nvm $nvmversion installed successfully."
+echo
+echo "Installing node v12.16.1..."
+sudo su - $clientname -c "nvm install 12.16.1" > /dev/null 2>&1
+sudo chown $clientname:$clientname -R /home/$clientname/.nvm
+nodeversion=$(sudo su - $clientname -c "node -v")
+echo -e "\t node $nodeversion installed successfully."
+echo
+echo "Installing pm2 v2.5.0..."
+sudo su - $clientname -c "npm install pm2@2.5.0 -g" > /dev/null 2>&1
+sudo chown $clientname:$clientname -R /home/$clientname/.nvm
+pm2version=$(sudo su - $clientname -c "pm2 -v")
+echo -e "\t pm2 $pm2version installed successfully."
+echo
+echo "Setup Connector Client Folder..."
+sudo mkdir -p /opt/$clientname/ConnClient
+sudo mkdir -p /opt/$clientname/ConnAdmin
+sudo mkdir /opt/$clientname/ConnClient/connections
+sudo mkdir /opt/$clientname/ConnClient/temp
+sudo mkdir /opt/$clientname/ConnClient/outbox
+sudo mkdir /opt/$clientname/ConnClient/outbox/prc
+sudo mkdir /opt/$clientname/ConnClient/outbox/tar
+#cache directory setup
+sudo mkdir /opt/$clientname/ConnClient/cache
+sudo touch /opt/$clientname/ConnClient/cache/locals.json 
+sudo touch /opt/$clientname/ConnClient/cache/activePolls.json
+sudo touch /opt/$clientname/ConnClient/cache/versions.json 
+sudo echo -e '{}' >> /opt/$clientname/ConnClient/cache/locals.json
+sudo echo -e '[]' >> /opt/$clientname/ConnClient/cache/activePolls.json
+sudo echo -e '{}' >> /opt/$clientname/ConnClient/cache/versions.json
+sudo chown -R $clientname:$clientname /opt/$clientname/ 
+#sudo chown -R $clientname:$clientname /opt/$clientname/ConnClient/ /opt/$clientname/ConnAdmin
+sudo chmod 700 /opt/$clientname
+sudo chmod 700 /opt/$clientname/ConnClient
+sudo chmod 700 /opt/$clientname/ConnAdmin
+echo 
+echo "Setup Connclient and ConnAdmin files from repo..."
+sudo cp -R /tmp/connector-admin/* /opt/$clientname/ConnAdmin/
+sudo cp -R /tmp/connector-client/* /opt/$clientname/ConnClient/
+sudo chown -R $clientname:$clientname /opt/$clientname/ConnClient/ /opt/$clientname/ConnAdmin/
+sudo rm -rf /tmp/connector-admin /tmp/connector-client /tmp/.git
+echo
+echo
+echo "NPM install for ConnClient..."
+touch /opt/$clientname-ConnClient-npm-debug.log
+chmod 766 /opt/$clientname-ConnClient-npm-debug.log
+sudo su $clientname -c "source /etc/profile && cd /opt/$clientname/ConnClient && npm install > /opt/$clientname-ConnClient-npm-debug.log" > /dev/null 2>&1 || { echo "NPM Install failed. Aborting installer. See errors at /opt/$clientname-ConnClient-npm-debug.log"; rm -rf /opt/$clientname/ConnClient/node_modules; rm -rf /opt/$clientname; kill -9 $(ps -ef | grep PM2 | grep $clientname) > /dev/null 2>&1; userdel $clientname; rm -rf /home/$clientname; exit 1; }
+sudo chown -R $clientname:$clientname /opt/$clientname/ConnClient/
+if [ -f /opt/$clientname/ConnClient/npm-debug.log ]
+then
+    echo -e "\t NPM install failed. Check /opt/$clientname/ConnClient/npm-debug.log"
+	exit
+else
+	echo -e '\t NPM successfully installed for ConnClient.'
+	sudo rm -rf /opt/$clientname-ConnClient-npm-debug.log
+fi
+echo
+echo "NPM install for ConnAdmin..."
+touch /opt/$clientname-ConnAdmin-npm-debug.log
+chmod 766 /opt/$clientname-ConnAdmin-npm-debug.log
+sudo su $clientname -c "source /etc/profile && cd /opt/$clientname/ConnAdmin && npm install > /opt/$clientname-ConnAdmin-npm-debug.log" > /dev/null 2>&1 || { echo "NPM Install failed. Aborting installer. See errors at /opt/$clientname-ConnAdmin-npm-debug.log"; rm -rf /opt/$clientname/ConnAdmin/node_modules; rm -rf /opt/$clientname; kill -9 $(ps -ef | grep PM2 | grep $clientname) > /dev/null 2>&1; userdel $clientname; rm -rf /home/$clientname; exit 1; }
+sudo chown -R $clientname:$clientname /opt/$clientname-ConnAdmin-npm-debug.log
+if [ -f /opt/$clientname/ConnAdmin/npm-debug.log ]
+then
+    echo -e "\t NPM install failed. Check /opt/$clientname/ConnAdmin/npm-debug.log"
+	exit
+else
+	echo -e '\t NPM successfully installed for ConnAdmin.'
+	sudo rm -rf /opt/$clientname-ConnAdmin-npm-debug.log
+fi
+echo
+echo "Setup ConnClient files..."
+sudo sed -i "s/opt\/ConnClient/opt\/$clientname\/ConnClient/g" /opt/$clientname/ConnClient/processes.json
+sudo sed -i "s/opt\/ConnAdmin/opt\/$clientname\/ConnAdmin/g" /opt/$clientname/ConnClient/processes.json
+sudo sed -i "s/ConnClient/ConnClient$clientname/g" /opt/$clientname/ConnClient/config/config.json
+sudo sed -i "s/$clientname/\u&/" /opt/$clientname/ConnClient/config/config.json
+echo
+echo "Setup ConnAdmin files..."
+sudo sed -i "s/opt\/ConnClient/opt\/$clientname\/ConnClient/g" /opt/$clientname/ConnAdmin/config.js
+sudo mkdir /opt/$clientname/ConnAdmin/temp
+sudo chown -R $clientname:$clientname /opt/$clientname/ConnAdmin/
+
+echo
+echo "Setup ConnAdmin files for MongoDB..."
+sudo sed -i "s/ConnClient/ConnClient$clientname/g" /opt/$clientname/ConnAdmin/auth_server.js
+sudo sed -i "s/$clientname/\u&/" /opt/$clientname/ConnAdmin/auth_server.js
+sudo sed -i "s/ConnClient/ConnClient$clientname/g" /opt/$clientname/ConnAdmin/controllers/users_controller.js
+sudo sed -i "s/$clientname/\u&/" /opt/$clientname/ConnAdmin/controllers/users_controller.js
+sudo sed -i "s/3000/$newport/g" /opt/$clientname/ConnAdmin/auth_server.js
+echo
+echo "Open firewall port $newport..."
+sudo ufw allow $newport > /dev/null 2>&1
+echo -e "\t Firewall port $newport successfully opened."
+echo
+echo -e "Checking firewall port $newport..."
+ufwstatus=$(ufw status | grep $newport | head -1 | awk '{print $1,$2,$3}')
+echo -e "\t $ufwstatus"
+echo
+if [ $clientname == "connector" ]
+then
+	echo "Start ConnClient Service..."
+	sudo su $clientname -c "source /etc/profile && cd /opt/$clientname/ConnClient && pm2 start ConnClient.js" > /dev/null 2>&1
+	echo
+	echo "Verify ConnClient Service..."
+	verifyConnClient=$(sudo su $clientname -c "source /etc/profile && cd /opt/$clientname/ConnClient && /home/$clientname/.nvm/versions/node/$nodeversion/bin/pm2 status" )
+	#sudo echo $verifyConnClient
+	printf "%s\n" "$verifyConnClient"
+	echo
+	echo "Check ConnClient Server Log Output..."
+	sudo tail -n 20 /home/$clientname/.pm2/logs/ConnClient-out-0.log
+	echo
+	echo "Check ConnClient Server Error Log Output..."
+	sudo tail -n 20 /home/$clientname/.pm2/logs/ConnClient-out-0.log
+	echo
+	echo "Start PollClient service..."
+	sudo su $clientname -c "source /etc/profile && cd /opt/$clientname/ConnClient && pm2 start PollClient.js" > /dev/null 2>&1
+	echo "Verify PollClient service..."
+	verifyPollClient=$(sudo su $clientname -c "source /etc/profile && cd /opt/$clientname/ConnClient && /home/$clientname/.nvm/versions/node/$nodeversion/bin/pm2 status" )
+	#sudo echo $verifyPollClient
+	printf "%s\n" "$verifyPollClient"
+	echo
+	echo "Verify PollClient Server Log Output..."
+	sudo tail -n 20 /home/$clientname/.pm2/logs/PollClient-out-1.log
+	echo
+	echo "Verify PollClient Server Error Output..."
+	sudo tail -n 20 /home/$clientname/.pm2/logs/PollClient-error-1.log
+fi
+echo
+echo "Start ConnAdmin service..."
+sudo su $clientname -c "source /etc/profile && cd /opt/$clientname/ConnAdmin && pm2 start auth_server.js" > /dev/null 2>&1
+echo "Verify ConnAdmin service..."
+verifyConnAdmin=$(sudo su $clientname -c "source /etc/profile && cd /opt/$clientname/ConnClient && /home/$clientname/.nvm/versions/node/$nodeversion/bin/pm2 status" ) 
+#sudo echo $verifyConnAdmin
+printf "%s\n" "$verifyConnAdmin"
+echo
+if [ $clientname == "connector" ]
+then
+	echo "Verify Auth Server Log Output..."
+	sudo tail -n 20 /home/$clientname/.pm2/logs/auth-server-out-2.log
+	echo
+	echo "Verify  Auth Server Error Log Output..."
+	sudo tail -n 20 /home/$clientname/.pm2/logs/auth-server-error-2.log
+	echo
+else
+	echo "Verify Auth Server Log Output..."
+	sudo tail -n 20 /home/$clientname/.pm2/logs/auth-server-out-0.log
+	echo
+	echo "Verify  Auth Server Error Log Output..."
+	sudo tail -n 20 /home/$clientname/.pm2/logs/auth-server-error-0.log
+	echo
+fi
+echo "Cleanups before exit..."
+sudo sed -i '/#nvm Environmental Variables/d' /etc/profile
+sudo sed -i '/#nvm env variables/d' /etc/profile
+sudo sed -i '/NVM_DIR/d' /etc/profile
+sudo rm -rf /tmp/npm-*
+echo
